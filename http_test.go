@@ -47,6 +47,27 @@ func TestHTTPSuccess(t *testing.T) {
 	}
 }
 
+func TestHTTPHighScoreSumDoesNotOverflow(t *testing.T) {
+	h := pairing.NewHandler()
+	rr := postJSON(t, h, `{
+		"players": [
+			{"id":"A","score":9223372036854775807},{"id":"B","score":0},
+			{"id":"C","score":9223372036854775807},{"id":"D","score":0}
+		]
+	}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rr.Code, rr.Body.String())
+	}
+	var plan pairing.Plan
+	if err := json.Unmarshal(rr.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	want := []pairing.Pair{{FirstID: "A", SecondID: "C"}, {FirstID: "B", SecondID: "D"}}
+	if len(plan.Pairs) != 2 || plan.Pairs[0] != want[0] || plan.Pairs[1] != want[1] {
+		t.Fatalf("pairs = %v, want %v", plan.Pairs, want)
+	}
+}
+
 func TestHTTPNoPairing(t *testing.T) {
 	h := pairing.NewHandler()
 	body := bytes.NewBufferString(`{

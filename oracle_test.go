@@ -3,6 +3,7 @@ package pairing_test
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"math/rand"
 	"slices"
 	"testing"
@@ -16,7 +17,7 @@ import (
 // lexicographic objective.
 type oraclePlan struct {
 	pairs     []pairing.Pair
-	scoreCost int
+	scoreCost *big.Int // exact: legal scores reach int64 and sums can overflow
 	colorCost int
 	key       []string
 	bye       int // index, -1 when nobody has a bye
@@ -33,10 +34,10 @@ func oracle(req *pairing.Request, index map[string]int, ids []string, scores map
 	var search func(bye int, used []bool, edges [][2]int, col map[int]pairing.Color)
 	leaf := func(bye int, edges [][2]int, col map[int]pairing.Color) {
 		p := renderPairs(ids, edges, col)
-		sc := 0
+		sc := new(big.Int)
 		for _, e := range edges {
 			a, b := ids[e[0]], ids[e[1]]
-			sc += abs(scores[a] - scores[b])
+			sc.Add(sc, big.NewInt(int64(abs(scores[a]-scores[b]))))
 		}
 		cc := 0
 		for i, id := range ids {
@@ -119,8 +120,8 @@ func oracle(req *pairing.Request, index map[string]int, ids []string, scores map
 }
 
 func oracleLess(a, b oraclePlan) bool {
-	if a.scoreCost != b.scoreCost {
-		return a.scoreCost < b.scoreCost
+	if c := a.scoreCost.Cmp(b.scoreCost); c != 0 {
+		return c < 0
 	}
 	if a.colorCost != b.colorCost {
 		return a.colorCost < b.colorCost
@@ -254,6 +255,16 @@ func generateFixture(rng *rand.Rand, n int) *fixture {
 	scores := make(map[string]int, n)
 	for _, id := range ids {
 		scores[id] = rng.Intn(12)
+	}
+	if rng.Intn(4) == 0 {
+		// A quarter of the fixtures push (some) scores to the top of the
+		// legal non-negative-int range, where naive cost sums overflow
+		// int64; the solver must stay exact there as well.
+		for _, id := range ids {
+			if rng.Intn(2) == 0 {
+				scores[id] = int(rng.Int63())
+			}
+		}
 	}
 	balance := make(map[string]int, n)
 	played := map[[2]string]bool{}

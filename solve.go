@@ -1,6 +1,7 @@
 package pairing
 
 import (
+	"math/big"
 	"slices"
 )
 
@@ -30,7 +31,7 @@ func NextRound(req *Request) (Plan, error) {
 
 // bestPlan accumulates the incumbent solution across the whole search.
 type bestPlan struct {
-	scoreCost int
+	scoreCost big.Int // exact: see the diff matrix in solve
 	colorCost int
 	key       []string
 	edges     [][2]int // sorted-index edges, in the same order as key
@@ -56,15 +57,29 @@ func (nr *normalized) solve() (Plan, error) {
 		absPost[i][1] = absInt(standing[i] - 1)
 	}
 
+	// Scores are only bounded below (any non-negative integer is legal), so
+	// a single edge difference already fills int64 and the sum over up to
+	// six edges can overflow it. Differences and their running total are
+	// kept as big integers so every comparison and the pruning bound stay
+	// exact for the whole legal score range.
+	diff := make([][]*big.Int, n)
+	for i := range diff {
+		diff[i] = make([]*big.Int, n)
+		for j := range diff[i] {
+			diff[i][j] = big.NewInt(int64(absInt(nr.score[i] - nr.score[j])))
+		}
+	}
+
 	best := bestPlan{bye: -1}
+	var scoreAcc big.Int // exact running total of the edges on the current path
 
 	// DFS state; edges are always appended at increasing "first free"
 	// indices i, so their anchor (min ID) sequence is already sorted by ID.
 	var dfs func(bye int, used []bool, edges [][2]int, orient []Color,
-		scoreSoFar, colorSoFar, remaining int)
+		colorSoFar, remaining int)
 	dfs = func(bye int, used []bool, edges [][2]int, orient []Color,
-		scoreSoFar, colorSoFar, remaining int) {
-		if best.found && scoreSoFar > best.scoreCost {
+		colorSoFar, remaining int) {
+		if best.found && scoreAcc.Cmp(&best.scoreCost) > 0 {
 			return // adding non-negative edge costs cannot improve
 		}
 		if remaining == 0 {
@@ -72,15 +87,16 @@ func (nr *normalized) solve() (Plan, error) {
 			if bye >= 0 {
 				totalColor += absInt(standing[bye])
 			}
+			cmp := 0
 			if best.found {
-				if scoreSoFar > best.scoreCost ||
-					(scoreSoFar == best.scoreCost && totalColor > best.colorCost) {
+				cmp = scoreAcc.Cmp(&best.scoreCost)
+				if cmp > 0 || (cmp == 0 && totalColor > best.colorCost) {
 					return
 				}
 			}
 			var key []string
-			dominates := !best.found || scoreSoFar < best.scoreCost ||
-				(scoreSoFar == best.scoreCost && totalColor < best.colorCost)
+			dominates := !best.found || cmp < 0 ||
+				(cmp == 0 && totalColor < best.colorCost)
 			if !dominates {
 				key = nr.canonicalKey(edges, orient, bye)
 				if slices.Compare(key, best.key) >= 0 {
@@ -89,7 +105,7 @@ func (nr *normalized) solve() (Plan, error) {
 			}
 			edgesCopy := append([][2]int(nil), edges...)
 			orientCopy := append([]Color(nil), orient...)
-			best.scoreCost = scoreSoFar
+			best.scoreCost.Set(&scoreAcc)
 			best.colorCost = totalColor
 			best.edges = edgesCopy
 			best.orient = orientCopy
@@ -110,9 +126,9 @@ func (nr *normalized) solve() (Plan, error) {
 			if used[j] || nr.played[i][j] {
 				continue
 			}
-			edgeScore := absInt(nr.score[i] - nr.score[j])
 			used[j] = true
 			edges = append(edges, [2]int{i, j})
+			scoreAcc.Add(&scoreAcc, diff[i][j])
 			// side 0: i first / j second; side 1: i second / j first
 			for side := 0; side < 2; side++ {
 				ci := sideAsColor(side)
@@ -123,9 +139,9 @@ func (nr *normalized) solve() (Plan, error) {
 					continue
 				}
 				orient[i], orient[j] = ci, cj
-				dfs(bye, used, edges, orient,
-					scoreSoFar+edgeScore, colorSoFar+postI+postJ, remaining-2)
+				dfs(bye, used, edges, orient, colorSoFar+postI+postJ, remaining-2)
 			}
+			scoreAcc.Sub(&scoreAcc, diff[i][j])
 			edges = edges[:len(edges)-1]
 			used[j] = false
 		}
@@ -144,13 +160,13 @@ func (nr *normalized) solve() (Plan, error) {
 			clear(used)
 			clear(orient)
 			used[bye] = true
-			dfs(bye, used, nil, orient, 0, 0, n-1)
+			dfs(bye, used, nil, orient, 0, n-1)
 		}
 		if !foundByeCandidate {
 			return Plan{}, ErrNoPairing
 		}
 	} else {
-		dfs(-1, used, nil, orient, 0, 0, n)
+		dfs(-1, used, nil, orient, 0, n)
 	}
 
 	if !best.found {

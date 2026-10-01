@@ -2,6 +2,8 @@ package pairing
 
 import (
 	"errors"
+	"math"
+	"math/bits"
 	"testing"
 )
 
@@ -258,6 +260,64 @@ func TestResultSatisfiesAllHardConstraints(t *testing.T) {
 			t.Fatalf("player paired twice: %v", plan.Pairs)
 		}
 		seen[p.FirstID], seen[p.SecondID] = true, true
+	}
+}
+
+func TestHighScoreSumOverflowPicksSameTier(t *testing.T) {
+	// Scores are legal up to math.MaxInt64; the sum of two maximal score
+	// differences overflows int64. The same-tier pairing (true cost 0)
+	// must still beat the cross-tier pairing (true cost 2*MaxInt64).
+	req := &Request{Players: []Player{
+		{ID: "A", Score: math.MaxInt64},
+		{ID: "B", Score: 0},
+		{ID: "C", Score: math.MaxInt64},
+		{ID: "D", Score: 0},
+	}}
+	plan, err := NextRound(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := Plan{
+		Round: 1,
+		Pairs: []Pair{
+			{FirstID: "A", SecondID: "C"},
+			{FirstID: "B", SecondID: "D"},
+		},
+	}
+	assertPlan(t, plan, want)
+}
+
+func TestHighScoreSumOverflowPermutations(t *testing.T) {
+	// The same two maximal and two zero scores assigned to every possible
+	// pair of IDs: whichever pairing the search visits first, the returned
+	// plan must pair equal scores (the unique zero-cost optimum).
+	ids := []string{"A", "B", "C", "D"}
+	for mask := 0; mask < 1<<4; mask++ {
+		if bits.OnesCount32(uint32(mask)) != 2 {
+			continue
+		}
+		players := make([]Player, 4)
+		scoreOf := map[string]int{}
+		for k, id := range ids {
+			if mask&(1<<k) != 0 {
+				players[k] = Player{ID: id, Score: math.MaxInt64}
+			} else {
+				players[k] = Player{ID: id}
+			}
+			scoreOf[id] = players[k].Score
+		}
+		plan, err := NextRound(&Request{Players: players})
+		if err != nil {
+			t.Fatalf("mask %04b: unexpected error: %v", mask, err)
+		}
+		if len(plan.Pairs) != 2 {
+			t.Fatalf("mask %04b: pairs = %v", mask, plan.Pairs)
+		}
+		for _, pr := range plan.Pairs {
+			if scoreOf[pr.FirstID] != scoreOf[pr.SecondID] {
+				t.Fatalf("mask %04b: cross-tier pair %v in plan %v", mask, pr, plan.Pairs)
+			}
+		}
 	}
 }
 
